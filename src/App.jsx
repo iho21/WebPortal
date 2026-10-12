@@ -130,9 +130,53 @@ function normalizeAttribute(value) {
   return value.trim().toLocaleLowerCase();
 }
 
+const ignoredWikipediaAttributePrefixes = [
+  'all articles',
+  'all wikipedia',
+  'articles with',
+  'articles containing',
+  'articles using',
+  'articles that',
+  'articles needing',
+  'articles lacking',
+  'pages with',
+  'cs1 ',
+  'short description',
+  'coordinates on wikidata',
+  'use dmy dates',
+  'use mdy dates',
+  'webarchive template',
+  'commons category',
+  'pages using gadget',
+  'wikipedia neutral point of view disputes',
+];
+const ignoredWikipediaAttributePhrases = ['needing translation', 'neutral point of view disputes'];
+
+function isUsableAttribute(value) {
+  const normalized = value.toLocaleLowerCase();
+  return !ignoredWikipediaAttributePrefixes.some((prefix) => normalized.startsWith(prefix)) &&
+    !ignoredWikipediaAttributePhrases.some((phrase) => normalized.includes(phrase));
+}
+
+function getWikipediaAttributes(page, category) {
+  const categories = (page.categories || [])
+    .map(({ title }) => title.replace(/^Category:/i, '').trim())
+    .filter((label) => label && isUsableAttribute(label));
+  const values = [...(category ? [category] : []), ...categories];
+  return values.filter((label, index) =>
+    values.findIndex((value) => normalizeAttribute(value) === normalizeAttribute(label)) === index,
+  );
+}
+
 function getAttributes(item) {
-  const values = item.attributes?.length ? item.attributes : [item.category];
-  return values.map((label) => ({ label, key: normalizeAttribute(label) }));
+  const values = item.attributes?.length
+    ? item.attributes
+    : item.api && item.category === 'Discovery'
+      ? []
+      : [item.category];
+  return values
+    .filter(isUsableAttribute)
+    .map((label) => ({ label, key: normalizeAttribute(label) }));
 }
 
 async function fetchDiscovery(category, search, previousImage, bannedAttributes) {
@@ -173,16 +217,13 @@ async function fetchDiscovery(category, search, previousImage, bannedAttributes)
   const pages = Object.values(result.query?.pages || {});
   const pageCategory = category === 'For you' ? null : category;
   const allowedPages = pages.filter((page) => {
-    const attributes = [
-      ...(pageCategory ? [pageCategory] : []),
-      ...(page.categories || []).map(({ title }) => title.replace(/^Category:/i, '').trim()),
-    ];
-    return !attributes.some((attribute) =>
+    const attributes = getWikipediaAttributes(page, pageCategory);
+    return attributes.length > 0 && !attributes.some((attribute) =>
       bannedAttributes.some((blocked) => blocked.key === normalizeAttribute(attribute)),
     );
   });
   if (!allowedPages.length) {
-    throw new Error('No matching articles found outside your blocked topics. Remove a blocked topic or try another category.');
+    throw new Error('No matching articles with unblocked topics were found. Remove a blocked topic or try another category.');
   }
 
   const pagesWithNewImages = allowedPages.filter(
@@ -197,19 +238,14 @@ async function fetchDiscovery(category, search, previousImage, bannedAttributes)
   const image = page.thumbnail?.source !== previousImage
     ? page.thumbnail?.source || fallbackImage
     : fallbackImage;
-  const attributes = [
-    ...(pageCategory ? [pageCategory] : []),
-    ...(page.categories || []).map(({ title }) => title.replace(/^Category:/i, '').trim()),
-  ].filter((attribute, index, all) =>
-    attribute && all.findIndex((value) => normalizeAttribute(value) === normalizeAttribute(attribute)) === index,
-  );
+  const attributes = getWikipediaAttributes(page, pageCategory);
 
   return {
     id: `wikipedia-${page.pageid}`,
     title: page.title,
     site: 'Wikipedia',
     url: page.fullurl,
-    category: pageCategory || attributes[0] || 'Discovery',
+    category: pageCategory || attributes[0],
     attributes,
     tag: 'WIKIPEDIA · FRESH FIND',
     description: page.extract || `Follow the trail and learn more about ${page.title}.`,
@@ -260,7 +296,13 @@ function readSaved() {
 function readDiscoveries() {
   try {
     const value = JSON.parse(localStorage.getItem('elsewhere-discoveries') || '[]');
-    return Array.isArray(value) ? value : [];
+    return Array.isArray(value)
+      ? value.filter((item) =>
+        item &&
+        Array.isArray(item.attributes) &&
+        item.attributes.some((attribute) => typeof attribute === 'string' && isUsableAttribute(attribute)),
+      )
+      : [];
   } catch {
     return [];
   }
@@ -418,6 +460,8 @@ export default function App() {
               key={item}
               className={`nav-link category-link ${category === item && !showSaved ? 'active' : ''}`}
               onClick={() => selectCategory(item)}
+              disabled={bannedAttributes.some((attribute) => attribute.key === normalizeAttribute(item))}
+              title={bannedAttributes.some((attribute) => attribute.key === normalizeAttribute(item)) ? `${item} is blocked. Remove it from Blocked Topics to browse.` : undefined}
             >
               <span className={`category-dot dot-${index}`} />
               <span>{item}</span>
@@ -486,6 +530,8 @@ export default function App() {
                 className={`filter-chip ${category === item && !showSaved ? 'chosen' : ''}`}
                 key={item}
                 onClick={() => selectCategory(item)}
+                disabled={item !== 'For you' && bannedAttributes.some((attribute) => attribute.key === normalizeAttribute(item))}
+                title={item !== 'For you' && bannedAttributes.some((attribute) => attribute.key === normalizeAttribute(item)) ? `${item} is blocked. Remove it from Blocked Topics to browse.` : undefined}
               >
                 {item === 'For you' && <Icon name="spark" size={15} />}
                 {item}
@@ -591,13 +637,15 @@ export default function App() {
                         </button>
                         <div className="mini-info">
                           <div className="mini-meta">
-                            <button
-                              className="mini-attribute"
-                              onClick={() => blockAttribute(getAttributes(pick)[0])}
-                              title={`Hide future discoveries tagged ${getAttributes(pick)[0].label}`}
-                            >
-                              {getAttributes(pick)[0].label.toUpperCase()}
-                            </button>
+                            {getAttributes(pick)[0] ? (
+                              <button
+                                className="mini-attribute"
+                                onClick={() => blockAttribute(getAttributes(pick)[0])}
+                                title={`Hide future discoveries tagged ${getAttributes(pick)[0].label}`}
+                              >
+                                {getAttributes(pick)[0].label.toUpperCase()}
+                              </button>
+                            ) : <span>{pick.category.toUpperCase()}</span>}
                             <span><i>·</i> {pick.tag.split(' · ')[1]}</span>
                           </div>
                           <h4>{pick.title}</h4>
